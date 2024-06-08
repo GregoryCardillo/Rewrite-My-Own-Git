@@ -420,3 +420,127 @@ class GitCommit(GitObject):
 
     def init(self):
         self.kvlm = dict()
+        
+#The log command 
+
+argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
+argsp.add_argument("commit",
+                   default="HEAD",
+                   nargs="?",
+                   help="Commit to start at.")
+
+def cmd_log(args):
+    repo = repo_find()
+
+    print("digraph wyaglog{")
+    print("  node[shape=rect]")
+    log_graphviz(repo, object_find(repo, args.commit), set())
+    print("}")
+
+def log_graphviz(repo, sha, seen):
+
+    if sha in seen:
+        return
+    seen.add(sha)
+
+    commit = object_read(repo, sha)
+    short_hash = sha[0:8]
+    message = commit.kvlm[None].decode("utf8").strip()
+    message = message.replace("\\", "\\\\")
+    message = message.replace("\"", "\\\"")
+
+    if "\n" in message: # Keep only the first line
+        message = message[:message.index("\n")]
+
+    print("  c_{0} [label=\"{1}: {2}\"]".format(sha, sha[0:7], message))
+    assert commit.fmt==b'commit'
+
+    if not b'parent' in commit.kvlm.keys():
+        # Base case: the initial commit.
+        return
+
+    parents = commit.kvlm[b'parent']
+
+    if type(parents) != list:
+        parents = [ parents ]
+
+    for p in parents:
+        p = p.decode("ascii")
+        print ("  c_{0} -> c_{1};".format(sha, p))
+        log_graphviz(repo, p, seen)
+
+#object wrapper for a single record
+class GitTreeLeaf (object):
+    def __init__(self, mode, path, sha):
+        self.mode = mode
+        self.path = path
+        self.sha = sha
+
+#parser to extract a single record
+def tree_parse_one(raw, start=0):
+    # Find the space terminator of the mode
+    x = raw.find(b' ', start)
+    assert x-start == 5 or x-start==6
+
+    # Read the mode
+    mode = raw[start:x]
+    if len(mode) == 5:
+        # Normalize to six bytes.
+        mode = b" " + mode
+
+    # Find the NULL terminator of the path
+    y = raw.find(b'\x00', x)
+    # and read the path
+    path = raw[x+1:y]
+
+    # Read the SHA and convert to a hex string
+    sha = format(int.from_bytes(raw[y+1:y+21], "big"), "040x")
+    return y+21, GitTreeLeaf(mode, path.decode("utf8"), sha)
+
+#parser which just calls the previous one in a loop, until input data is exhausted
+def tree_parse(raw):
+    pos = 0
+    max = len(raw)
+    ret = list()
+    while pos < max:
+        pos, data = tree_parse_one(raw, pos)
+        ret.append(data)
+
+    return ret
+
+# Notice this isn't a comparison function, but a conversion function.
+# Python's default sort doesn't accept a custom comparison function,
+# like in most languages, but a `key` arguments that returns a new
+# value, which is compared using the default rules.  So we just return
+# the leaf name, with an extra / if it's a directory.
+def tree_leaf_sort_key(leaf):
+    if leaf.mode.startswith(b"10"):
+        return leaf.path
+    else:
+        return leaf.path + "/"
+    
+#sort items and write them in order
+def tree_serialize(obj):
+    obj.items.sort(key=tree_leaf_sort_key)
+    ret = b''
+    for i in obj.items:
+        ret += i.mode
+        ret += b' '
+        ret += i.path.encode("utf8")
+        ret += b'\x00'
+        sha = int(i.sha, 16)
+        ret += sha.to_bytes(20, byteorder="big")
+    return ret
+
+#combine all into a class
+class GitTree(GitObject):
+    fmt=b'tree'
+
+    def deserialize(self, data):
+        self.items = tree_parse(data)
+
+    def serialize(self):
+        return tree_serialize(self)
+
+    def init(self):
+        self.items = list()
